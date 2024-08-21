@@ -1,52 +1,96 @@
 const express = require("express");
-const bodyParser = require("body-parser");
+const mongoose = require("mongoose");
+const xlsx = require("xlsx");
+const WaterUsage = require("./model/Water");
+require("dotenv").config();
+
 const app = express();
+app.use(express.json());
 
-app.use(bodyParser.urlencoded({ extended: false }));
+const client = require("twilio")(
+  process.env.TWILIO_ACCOUNT_SID,
+  process.env.TWILIO_AUTH_TOKEN
+);
 
-app.post("/webhook", (req, res) => {
-  const incomingMessage = req.body.Body;
-  const from = req.body.From;
-  const date = new Date().toLocaleDateString();
+mongoose
+  .connect(process.env.MONGO_URI)
+  .then(() => console.log("MongoDB connected..."))
+  .catch((err) => console.error(err));
 
-  if (incomingMessage.toLowerCase().includes("liters")) {
-    const waterUsage = incomingMessage.match(/\\d+/)[0];
+app.get("/", (req, res) => {
+  res.send("whatsApp ChatBot app");
+});
 
-    const wb = xlsx.readFile(dataFilePath);
-    const ws = wb.Sheets["Data"];
-    const newRow = { Date: date, Value: `${waterUsage} liters` };
-    const newRowData = [newRow.Date, newRow.Value];
-    const wsData = xlsx.utils.sheet_to_json(ws, { header: 1 });
-    wsData.push(newRowData);
-    const newWs = xlsx.utils.aoa_to_sheet(wsData);
-    wb.Sheets["Data"] = newWs;
-    xlsx.writeFile(wb, dataFilePath);
+const sendWaterUsagePrompt = () => {
+  client.messages
+    .create({
+      body: "Please send today's Water Usage Data.",
+      from: "whatsapp:+14155238886",
+      to: "whatsapp:+919776547647",
+    })
+    .then((message) => console.log(`Message sent: ${message.sid}`))
+    .catch((err) => console.error("Failed to send message:", err));
+};
+// Endpoint to receive messages from users
+app.post("/webhook", async (req, res) => {
+  try {
+    const incomingMessage = req.body.Body;
+    const from = req.body.From;
 
-    client.messages.create({
-      body: `Data received: ${waterUsage} liters on ${date}`,
-      from: whatsappNumber,
+    const waterUsage = new WaterUsage({ value: incomingMessage });
+    await waterUsage.save();
+
+    saveToExcel(incomingMessage);
+
+    await client.messages.create({
+      from: process.env.TWILIO_WHATSAPP_NUMBER,
+      body: `Thank you! You've recorded: ${incomingMessage}`,
       to: from,
     });
-  } else {
-    client.messages.create({
-      body: `Please input the water usage in the format 'XXX liters'.`,
-      from: whatsappNumber,
-      to: from,
-    });
+
+    res.status(200).json({ msg: "message recieved" });
+  } catch (error) {
+    console.error("Error processing webhook:", error);
+    res.sendStatus(500);
+  }
+});
+
+const saveToExcel = (value) => {
+  let workbook;
+  const fileName = "water_usage.xlsx";
+  try {
+    workbook = xlsx.readFile(fileName);
+  } catch (e) {
+    console.error("Error reading file:", e);
+    workbook = xlsx.utils.book_new();
   }
 
-  res.sendStatus(200);
-});
+  const sheetName = "WaterUsage";
+  let worksheet = workbook.Sheets[sheetName];
 
+  if (!worksheet) {
+    worksheet = xlsx.utils.aoa_to_sheet([["Date", "Value"]]);
+    xlsx.utils.book_append_sheet(workbook, worksheet, sheetName);
+  }
+
+  const newRow = [new Date().toLocaleString(), value];
+  const data = xlsx.utils.sheet_to_json(worksheet, { header: 1 });
+  data.push(newRow);
+
+  worksheet = xlsx.utils.aoa_to_sheet(data);
+  workbook.Sheets[sheetName] = worksheet;
+  try {
+    xlsx.writeFile(workbook, fileName);
+    console.log("File written successfully");
+  } catch (error) {
+    console.error("Error writing file:", error);
+  }
+};
+sendWaterUsagePrompt();
 setInterval(() => {
-  client.messages.create({
-    body: "Please send today's Water Usage Data.",
-    from: `whatsapp:${process.env.TWILIO_WHATSAPP_NUMBER}`,
-    to: `whatsapp:+919776547647`,
-  });
-}, 300000); // 300000 ms = 5 minutes
+  sendWaterUsagePrompt();
+}, 300000);
 
-const port = process.env.PORT;
-app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
-});
+// Start the server
+const PORT = process.env.PORT;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
